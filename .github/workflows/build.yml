@@ -1,4 +1,4 @@
-name: Build and Push custom-frappe
+name: Build and Push custom-frappe Image
 
 on:
   workflow_dispatch:
@@ -14,6 +14,40 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      - name: Encode apps.json
+        id: encode
+        run: echo "APPS_JSON_BASE64=$(base64 -w 0 apps.json)" >> $GITHUB_ENV
+
+      - name: Generate date tag
+        run: echo "DATE_TAG=$(date +'%Y%m%d')" >> $GITHUB_ENV
+
+      - name: Extract SHAs for apps.json
+        id: shas
+        run: |
+          echo "APP_SHAS<<EOF" >> $GITHUB_ENV
+
+          for row in $(jq -c '.[]' apps.json); do
+            URL=$(echo $row | jq -r '.url')
+            BRANCH=$(echo $row | jq -r '.branch')
+            REPO_NAME=$(basename $URL)
+
+            echo "Cloning $REPO_NAME @ $BRANCH…"
+
+            git clone --depth 1 --branch $BRANCH $URL temp-$REPO_NAME
+            SHA=$(git -C temp-$REPO_NAME rev-parse HEAD)
+
+            echo "$REPO_NAME ($BRANCH): $SHA" >> $GITHUB_ENV
+            rm -rf temp-$REPO_NAME
+          done
+
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Publish SHAs to Build Summary
+        run: |
+          echo "### App Versions Included" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "${{ env.APP_SHAS }}" >> $GITHUB_STEP_SUMMARY
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
@@ -28,11 +62,19 @@ jobs:
         with:
           context: .
           file: images/layered/Containerfile
+          push: true
           build-args: |
             FRAPPE_PATH=https://github.com/frappe/frappe
             FRAPPE_BRANCH=version-15
-            APPS_JSON_BASE64=${{ secrets.APPS_JSON_BASE64 }}
-          push: true
+            APPS_JSON_BASE64=${{ env.APPS_JSON_BASE64 }}
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/custom-frappe:15
             ${{ secrets.DOCKERHUB_USERNAME }}/custom-frappe:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/custom-frappe:15
+            ${{ secrets.DOCKERHUB_USERNAME }}/custom-frappe:15.${{ env.DATE_TAG }}
+          labels: |
+            org.opencontainers.image.title=custom-frappe
+            org.opencontainers.image.description=Custom ERPNext image with HRMS/CRM apps baked in. Build pipeline and source available at: https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.run_started_at }}
+            frappe.build.apps-sha=${{ env.APP_SHAS }}
